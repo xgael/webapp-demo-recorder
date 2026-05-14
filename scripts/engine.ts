@@ -10,7 +10,7 @@
  * email, navegadores, todo).
  */
 import { chromium, type Browser, type BrowserContext, type Page } from "playwright";
-import { renameSync, readdirSync, mkdirSync, existsSync } from "fs";
+import { renameSync, readdirSync, mkdirSync, existsSync, statSync } from "fs";
 import { join, dirname, basename } from "path";
 import { execSync } from "child_process";
 
@@ -234,10 +234,17 @@ async function executeStep(
       if (!el) throw new Error(`clickLink: no encontré ${step.selector}`);
       const href = await el.getAttribute("href");
       if (!href) throw new Error(`clickLink: el elemento no tiene href`);
-      const full = href.startsWith("http")
+      const target = href.startsWith("http")
         ? href
         : new URL(href, cfg.baseUrl).toString();
-      await page.goto(full, { waitUntil: "load" });
+      // Click real para que el gesto sea visible y respete handlers del SPA.
+      // Si el click no dispara navegación (preventDefault), caemos a goto.
+      await Promise.all([
+        page.waitForURL(target, { timeout: 10000 }).catch(async () => {
+          await page.goto(target, { waitUntil: "load" });
+        }),
+        el.click(),
+      ]);
       await page.waitForTimeout(500);
       return;
     }
@@ -295,11 +302,15 @@ export async function recordDemo(cfg: DemoConfig): Promise<{ mp4: string; webm: 
     if (browser) await browser.close().catch(() => {});
   }
 
-  // Move the latest webm
-  const webms = readdirSync(videoDir).filter((f) => f.endsWith(".webm"));
+  // Move the latest webm. Playwright nombra los archivos con UUIDs, así que
+  // ordenamos por mtime para agarrar el más reciente (robusto si quedan
+  // webms viejos de corridas previas en .demo-videos/).
+  const webms = readdirSync(videoDir)
+    .filter((f) => f.endsWith(".webm"))
+    .map((f) => ({ name: f, mtime: statSync(join(videoDir, f)).mtimeMs }))
+    .sort((a, b) => a.mtime - b.mtime);
   if (webms.length === 0) throw new Error("Playwright no produjo .webm — algo falló");
-  webms.sort();
-  const latest = webms[webms.length - 1];
+  const latest = webms[webms.length - 1].name;
   const rawWebm = join(outDir, basename(cfg.output, ".mp4") + ".webm");
   renameSync(join(videoDir, latest), rawWebm);
   console.log(`✓ WEBM raw: ${rawWebm}`);
