@@ -51,9 +51,21 @@ Lee [SKILL.md](./SKILL.md) para los detalles que Claude usa.
 
 ## API
 
-```ts
-import { recordDemo, type DemoConfig } from "webapp-demo-recorder/scripts/engine";
+Si estás escribiendo un demo dentro de este repo (como los ejemplos), importa relativo:
 
+```ts
+import { recordDemo, type DemoConfig } from "../scripts/engine";
+```
+
+Si lo instalaste como skill en `~/.claude/skills/webapp-demo-recorder/`, usa el path absoluto:
+
+```ts
+import { recordDemo, type DemoConfig } from "~/.claude/skills/webapp-demo-recorder/scripts/engine";
+```
+
+Ejemplo de uso:
+
+```ts
 await recordDemo({
   baseUrl: "http://localhost:3000",
   output: "/tmp/demo.mp4",
