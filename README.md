@@ -140,10 +140,26 @@ await recordDemo({
 });
 ```
 
-**Setup:**
-```bash
-export ELEVENLABS_API_KEY=tu_api_key
-```
+**Setup de la API key** (tres opciones, en orden de preferencia):
+
+1. **`.env` en la raíz de la skill** — pega una vez, funciona siempre:
+   ```bash
+   cp .env.example .env
+   # edita .env y pon ELEVENLABS_API_KEY=tu_key
+   ```
+   Está en `.gitignore`. El engine lo auto-carga; el shell siempre gana sobre
+   el archivo (no sobreescribe vars ya exportadas).
+
+2. **Variable de entorno** — útil para CI/CD:
+   ```bash
+   export ELEVENLABS_API_KEY=tu_key
+   ```
+
+3. **`narration.apiKey` directo en la config** — sólo como override puntual.
+   No recomendado: el script de demo se puede commitear por accidente.
+
+> ⚠️ No pegues la key en un chat con Claude ni en mensajes. Queda en historial
+> y se puede filtrar al compartir conversaciones. Usa `.env` y olvídate.
 
 **Costo:** `eleven_multilingual_v2` cuesta ~$0.30/1k chars. Un demo típico
 (500-1500 chars de captions) sale ~$0.15-0.45. Re-runs son **gratis**: hay

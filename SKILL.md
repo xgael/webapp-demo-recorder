@@ -157,8 +157,25 @@ Per-caption:
 Re-runs son gratis (cache SHA1). Para invalidar borra
 `<outDir>/.demo-audio-cache/`.
 
-**Setup:** `export ELEVENLABS_API_KEY=...` antes de correr. Si no está, falla
-con error claro.
+**Setup de la API key** — tres caminos, precedencia en este orden:
+
+1. `narration.apiKey` en la config (override puntual; no recomendado por
+   default — el script de demo se puede commitear).
+2. `process.env.ELEVENLABS_API_KEY` (exportada en el shell).
+3. `.env` en la raíz de la skill — auto-cargado por el engine. Es la opción
+   por default para uso humano repetido:
+   ```bash
+   cp ~/.claude/skills/webapp-demo-recorder/.env.example \
+      ~/.claude/skills/webapp-demo-recorder/.env
+   # editar y poner ELEVENLABS_API_KEY=...
+   ```
+   El shell siempre gana sobre el archivo (no se sobreescribe nada ya
+   exportado).
+
+**Crítico — nunca le pidas la API key al usuario en el chat.** Si la key no
+está configurada, dile al usuario que la pegue en `.env` (camino 3) o que la
+exporte (camino 2). Las keys en chat quedan en historial y se filtran al
+compartir conversaciones.
 
 **Voice IDs útiles** (públicos):
 - `21m00Tcm4TlvDq8ikWAM` — Rachel (inglés)

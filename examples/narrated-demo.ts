@@ -3,10 +3,12 @@
  * ElevenLabs leyendo cada caption. Cada caption queda sincronizado con
  * su audio (el `duration` se ajusta automáticamente al largo de la voz).
  *
- * Setup:
- *   export ELEVENLABS_API_KEY=tu_api_key
- *   cd <directorio-de-tu-app>
- *   pnpm dev &
+ * Setup de la API key (escoge una):
+ *   - cp .env.example .env && edita .env con tu key (recomendado)
+ *   - export ELEVENLABS_API_KEY=tu_api_key
+ *
+ * Correr:
+ *   cd <directorio-de-tu-app> && pnpm dev &
  *   cd ~/.claude/skills/webapp-demo-recorder
  *   pnpm tsx examples/narrated-demo.ts
  *

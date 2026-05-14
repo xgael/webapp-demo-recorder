@@ -10,8 +10,8 @@
  * email, navegadores, todo).
  */
 import { chromium, type Browser, type BrowserContext, type Page } from "playwright";
-import { renameSync, readdirSync, mkdirSync, existsSync, writeFileSync, statSync } from "fs";
-import { join, dirname, basename } from "path";
+import { renameSync, readdirSync, mkdirSync, existsSync, writeFileSync, statSync, readFileSync } from "fs";
+import { join, dirname, basename, resolve } from "path";
 import { execSync } from "child_process";
 import { createHash } from "crypto";
 
@@ -208,6 +208,42 @@ async function scrollToBottom(page: Page, speed: number) {
   await page.waitForTimeout(500);
 }
 
+// ── .env loader ─────────────────────────────────────────────────────────────
+
+/**
+ * Carga un .env (formato `KEY=value` por línea) en `process.env`.
+ * No sobreescribe variables que ya estén definidas en el entorno — así el
+ * shell siempre gana sobre el archivo. Silencioso si el archivo no existe.
+ *
+ * Parser deliberadamente simple: soporta comentarios con `#`, ignora líneas
+ * vacías, hace strip de comillas envolventes. No soporta expansión ni
+ * multilínea — si necesitas eso, instala `dotenv`.
+ */
+function loadEnvFile(path: string): void {
+  if (!existsSync(path)) return;
+  const lines = readFileSync(path, "utf8").split(/\r?\n/);
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+    const eq = trimmed.indexOf("=");
+    if (eq < 0) continue;
+    const key = trimmed.slice(0, eq).trim();
+    let value = trimmed.slice(eq + 1).trim();
+    if (
+      (value.startsWith('"') && value.endsWith('"')) ||
+      (value.startsWith("'") && value.endsWith("'"))
+    ) {
+      value = value.slice(1, -1);
+    }
+    if (process.env[key] === undefined) {
+      process.env[key] = value;
+    }
+  }
+}
+
+/** Raíz del repo/skill: este archivo vive en `<root>/scripts/engine.ts`. */
+const SKILL_ROOT = resolve(__dirname, "..");
+
 // ── ElevenLabs TTS ──────────────────────────────────────────────────────────
 
 interface NarrationClip {
@@ -237,7 +273,11 @@ async function synthesizeText(
   const apiKey = cfg.apiKey ?? process.env.ELEVENLABS_API_KEY;
   if (!apiKey) {
     throw new Error(
-      "narration: falta API key. Pasa `apiKey` o exporta ELEVENLABS_API_KEY.",
+      `narration: falta ELEVENLABS_API_KEY. Tres opciones (en orden de preferencia):
+  1. Crea ${join(SKILL_ROOT, ".env")} con ELEVENLABS_API_KEY=tu_key
+     (cp .env.example .env y edita)
+  2. Exporta en tu shell: export ELEVENLABS_API_KEY=tu_key
+  3. Pasa narration.apiKey directo en la config (no recomendado: queda en código)`,
     );
   }
   const modelId = cfg.modelId ?? "eleven_multilingual_v2";
@@ -427,6 +467,10 @@ async function executeStep(
 // ── Main API ────────────────────────────────────────────────────────────────
 
 export async function recordDemo(cfg: DemoConfig): Promise<{ mp4: string; webm: string }> {
+  // Auto-load .env desde la raíz de la skill. Si el shell ya tiene la var
+  // exportada, gana. Si no, llenamos desde el archivo. Silencioso si no existe.
+  loadEnvFile(join(SKILL_ROOT, ".env"));
+
   const viewport = cfg.viewport ?? { width: 1280, height: 800 };
   const accentColor = cfg.accentColor ?? "#E30613";
   const crf = cfg.crf ?? 22;
