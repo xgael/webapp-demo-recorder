@@ -1,6 +1,6 @@
 ---
 name: webapp-demo-recorder
-description: Graba videos demo automatizados de aplicaciones web. Usa Playwright headless con video recording nativo + ffmpeg. Útil cuando el usuario pide "graba un video del demo", "haz un screencast del flujo", "genera un video que muestre cómo funciona X". Soporta captions overlay, highlights, agent-done detection, scroll suave, click-link-to-navigate.
+description: Graba videos demo automatizados de aplicaciones web. Usa Playwright headless con video recording nativo + ffmpeg. Útil cuando el usuario pide "graba un video del demo", "haz un screencast del flujo", "genera un video que muestre cómo funciona X", "agrega voz al video", "narra el demo". Soporta captions overlay, highlights, agent-done detection, scroll suave, click-link-to-navigate, y narración opcional con ElevenLabs TTS sincronizada por caption.
 ---
 
 # webapp-demo-recorder
@@ -12,6 +12,7 @@ Genera videos MP4 de aplicaciones web siguiendo un "guion" declarativo (lista de
 - ✅ Funciona en CI/CD
 - ✅ Resolución exacta del viewport (no del display físico)
 - ✅ Reproducible — corre 10 veces y sale igual
+- ✅ Voz opcional sincronizada con captions (ElevenLabs TTS)
 
 ## Cuándo usar este skill
 
@@ -21,8 +22,13 @@ Activación natural:
 - "Necesito un video para mostrarle a mi cliente cómo funciona"
 - "Genera un video que pase por estos pasos: login → consulta → ..."
 
+Activación con narración (voz):
+- "Graba el demo pero con voz explicando cada paso"
+- "Agrega narración al video"
+- "Necesito un screencast con audio que explique"
+
 NO usar para:
-- Grabación con audio narrado en tiempo real (esto graba el browser, no el desktop)
+- Captura de audio del sistema en vivo (mic, system audio del macOS — esto graba sólo browser + TTS sintetizado)
 - Grabación de apps nativas/desktop (esto es web-only)
 - Screenshots estáticos (usar `screencapture` directo)
 
@@ -64,7 +70,8 @@ await recordDemo(config);
 ## Step types disponibles
 
 ```ts
-| { type: "caption"; text: string; duration?: number }                    // overlay con subtítulo
+| { type: "caption"; text: string; duration?: number;                     // overlay con subtítulo
+    narrationText?: string; mute?: boolean }                              //   + voz opcional si hay narration
 | { type: "navigate"; url: string; waitUntil?: "load" | "networkidle" }   // relativa o absoluta
 | { type: "fill"; selector: string; value: string }                       // input rápido
 | { type: "type"; selector: string; value: string; perCharMs?: [n,n] }    // letra por letra (humano)
@@ -123,6 +130,44 @@ Cada `caption` bloquea hasta que termina su animación (fade-in + display +
 fade-out). El default es 2800ms. Si tienes captions seguidos sin espera entre
 ellos, queda un ritmo natural — no necesitas `wait` extra.
 
+### Narración con voz (ElevenLabs)
+
+Si el usuario pide voz/narración, agrega un bloque `narration` a la config.
+Cada `caption` se sintetiza con ElevenLabs antes de la grabación, el
+`duration` se ajusta automáticamente para que dure al menos lo que dura el
+audio (+400ms de cola), y el audio se mezcla al MP4 final.
+
+```ts
+narration: {
+  // Usa process.env.ELEVENLABS_API_KEY por default
+  voiceId: "EXAVITQu4vr4xnSDxMaL",        // Sarah, multilingüe
+  modelId: "eleven_multilingual_v2",       // soporta español; default
+  stability: 0.5,                          // default
+  similarityBoost: 0.75,                   // default
+  // cache: true por default — guarda en <outDir>/.demo-audio-cache/
+}
+```
+
+Per-caption:
+- `narrationText`: texto que dice la voz si difiere del subtítulo (útil cuando
+  el texto en pantalla es corto y la narración es expandida).
+- `mute: true`: este caption sale sin voz.
+
+**Costo:** `eleven_multilingual_v2` ~$0.30/1k chars. Demo típico = $0.15-0.45.
+Re-runs son gratis (cache SHA1). Para invalidar borra
+`<outDir>/.demo-audio-cache/`.
+
+**Setup:** `export ELEVENLABS_API_KEY=...` antes de correr. Si no está, falla
+con error claro.
+
+**Voice IDs útiles** (públicos):
+- `21m00Tcm4TlvDq8ikWAM` — Rachel (inglés)
+- `EXAVITQu4vr4xnSDxMaL` — Sarah (multilingüe, natural)
+- `pNInz6obpgDQGcFmaJgB` — Adam (inglés)
+
+Si el usuario tiene una voz clonada propia, pregúntale el ID (lo saca de
+app.elevenlabs.io/voice-lab).
+
 ### Resolución del WEBM
 
 El WEBM raw que produce Playwright **NO siempre** respeta exactamente el
@@ -158,6 +203,8 @@ cuando los selectores CSS son frágiles.
 Mira `examples/`:
 
 - **`basic-login-demo.ts`** — login + 1 query + caption. El "hello world".
+- **`narrated-demo.ts`** — el mismo flow con narración de ElevenLabs. Buena
+  referencia de cómo separar `text` (subtítulo) de `narrationText` (voz).
 - **`javer-multi-profile.ts`** — el demo real que armé para JAVER: 3 perfiles
   de usuario + envío de email + preview. Buena referencia de complejidad real.
 
