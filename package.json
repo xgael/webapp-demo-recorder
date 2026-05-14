@@ -1,0 +1,42 @@
+{
+  "name": "webapp-demo-recorder",
+  "version": "0.1.0",
+  "description": "Graba videos demo automatizados de aplicaciones web usando Playwright headless + ffmpeg. Diseñado como skill para Claude Code.",
+  "private": false,
+  "license": "MIT",
+  "author": "xgael",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/xgael/webapp-demo-recorder.git"
+  },
+  "type": "commonjs",
+  "main": "scripts/engine.ts",
+  "scripts": {
+    "record": "tsx scripts/engine.ts",
+    "example:basic": "tsx examples/basic-login-demo.ts",
+    "example:javer": "tsx examples/javer-multi-profile.ts",
+    "setup": "npx playwright install chromium"
+  },
+  "dependencies": {
+    "playwright": "^1.48.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.20.0",
+    "typescript": "^5.7.0"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": [
+    "claude",
+    "claude-code",
+    "skill",
+    "playwright",
+    "demo",
+    "screencast",
+    "video",
+    "automation",
+    "ffmpeg"
+  ]
+}
