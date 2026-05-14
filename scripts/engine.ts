@@ -10,15 +10,20 @@
  * email, navegadores, todo).
  */
 import { chromium, type Browser, type BrowserContext, type Page } from "playwright";
-import { renameSync, readdirSync, mkdirSync, existsSync } from "fs";
+import { renameSync, readdirSync, mkdirSync, existsSync, writeFileSync, statSync } from "fs";
 import { join, dirname, basename } from "path";
 import { execSync } from "child_process";
+import { createHash } from "crypto";
 
 // ── Tipos del guion ─────────────────────────────────────────────────────────
 
 export type DemoStep =
-  /** Muestra un caption overlay durante `duration` ms. Bloquea hasta que termina. */
-  | { type: "caption"; text: string; duration?: number }
+  /** Muestra un caption overlay durante `duration` ms. Bloquea hasta que termina.
+   *  Si la config tiene `narration`, se sintetiza este caption en voz y se mezcla
+   *  con el video al final. `narrationText` permite que la voz diga algo distinto
+   *  al texto en pantalla (útil para captions cortos con narración expandida).
+   *  `mute: true` desactiva la narración sólo para este caption. */
+  | { type: "caption"; text: string; duration?: number; narrationText?: string; mute?: boolean }
   /** Navega a una URL relativa o absoluta. */
   | { type: "navigate"; url: string; waitUntil?: "load" | "networkidle" }
   /** Llena un input con un valor. Limpia primero. */
@@ -60,6 +65,28 @@ export interface DemoConfig {
   accentColor?: string;
   /** CRF de ffmpeg (calidad). 18 = casi lossless, 22 = bueno, 28 = aceptable. Default: 22. */
   crf?: number;
+  /** Narración via ElevenLabs TTS. Si se provee, los captions se sintetizan en
+   *  voz, sus `duration` se ajustan al largo del audio, y el audio se mezcla
+   *  al MP4 final. */
+  narration?: NarrationConfig;
+}
+
+export interface NarrationConfig {
+  /** API key de ElevenLabs. Si no se provee, lee `ELEVENLABS_API_KEY` del env. */
+  apiKey?: string;
+  /** Voice ID. Requerido. Ej: "21m00Tcm4TlvDq8ikWAM" (Rachel),
+   *  "EXAVITQu4vr4xnSDxMaL" (Sarah), "pNInz6obpgDQGcFmaJgB" (Adam). */
+  voiceId: string;
+  /** Modelo. Default: "eleven_multilingual_v2" (soporta español). */
+  modelId?: string;
+  /** Voice settings — stability 0-1. Default: 0.5. */
+  stability?: number;
+  /** Voice settings — similarity boost 0-1. Default: 0.75. */
+  similarityBoost?: number;
+  /** Voice settings — use_speaker_boost. Default: false. */
+  speakerBoost?: boolean;
+  /** Cachear síntesis en `<outDir>/.demo-audio-cache/`. Default: true. */
+  cache?: boolean;
 }
 
 // ── Helpers que viven dentro del browser ────────────────────────────────────
@@ -181,6 +208,154 @@ async function scrollToBottom(page: Page, speed: number) {
   await page.waitForTimeout(500);
 }
 
+// ── ElevenLabs TTS ──────────────────────────────────────────────────────────
+
+interface NarrationClip {
+  /** Index del step en cfg.steps. */
+  stepIndex: number;
+  /** Path absoluto al .mp3 sintetizado. */
+  audioPath: string;
+  /** Duración del audio en ms (medida con ffprobe). */
+  durationMs: number;
+}
+
+function getAudioDurationMs(audioPath: string): number {
+  const out = execSync(
+    `ffprobe -v error -show_entries format=duration -of csv=p=0 "${audioPath}"`,
+    { encoding: "utf8" },
+  ).trim();
+  const seconds = parseFloat(out);
+  if (!isFinite(seconds)) throw new Error(`ffprobe: duración inválida para ${audioPath}: ${out}`);
+  return Math.round(seconds * 1000);
+}
+
+async function synthesizeText(
+  text: string,
+  cfg: NarrationConfig,
+  cacheDir: string,
+): Promise<string> {
+  const apiKey = cfg.apiKey ?? process.env.ELEVENLABS_API_KEY;
+  if (!apiKey) {
+    throw new Error(
+      "narration: falta API key. Pasa `apiKey` o exporta ELEVENLABS_API_KEY.",
+    );
+  }
+  const modelId = cfg.modelId ?? "eleven_multilingual_v2";
+  const stability = cfg.stability ?? 0.5;
+  const similarityBoost = cfg.similarityBoost ?? 0.75;
+  const speakerBoost = cfg.speakerBoost ?? false;
+  const useCache = cfg.cache !== false;
+
+  const cacheKey = createHash("sha1")
+    .update(
+      JSON.stringify({
+        text,
+        voiceId: cfg.voiceId,
+        modelId,
+        stability,
+        similarityBoost,
+        speakerBoost,
+      }),
+    )
+    .digest("hex");
+  const cachePath = join(cacheDir, `${cacheKey}.mp3`);
+
+  if (useCache && existsSync(cachePath) && statSync(cachePath).size > 0) {
+    return cachePath;
+  }
+
+  const res = await fetch(
+    `https://api.elevenlabs.io/v1/text-to-speech/${cfg.voiceId}`,
+    {
+      method: "POST",
+      headers: {
+        "xi-api-key": apiKey,
+        "Content-Type": "application/json",
+        Accept: "audio/mpeg",
+      },
+      body: JSON.stringify({
+        text,
+        model_id: modelId,
+        voice_settings: {
+          stability,
+          similarity_boost: similarityBoost,
+          use_speaker_boost: speakerBoost,
+        },
+      }),
+    },
+  );
+  if (!res.ok) {
+    const body = await res.text().catch(() => "<no body>");
+    throw new Error(`ElevenLabs ${res.status}: ${body}`);
+  }
+  const buf = Buffer.from(await res.arrayBuffer());
+  if (!existsSync(dirname(cachePath))) mkdirSync(dirname(cachePath), { recursive: true });
+  writeFileSync(cachePath, buf);
+  return cachePath;
+}
+
+/**
+ * Pre-sintetiza todas las narraciones y muta `duration` en los captions
+ * para que sea al menos tan largo como el audio + 400ms de cola.
+ * Devuelve los clips indexados por stepIndex para el muxing final.
+ */
+async function preSynthesizeNarrations(
+  cfg: DemoConfig,
+  cacheDir: string,
+): Promise<NarrationClip[]> {
+  if (!cfg.narration) return [];
+  if (!existsSync(cacheDir)) mkdirSync(cacheDir, { recursive: true });
+
+  const clips: NarrationClip[] = [];
+  for (let i = 0; i < cfg.steps.length; i++) {
+    const step = cfg.steps[i];
+    if (step.type !== "caption") continue;
+    if (step.mute) continue;
+    const text = (step.narrationText ?? step.text).trim();
+    if (!text) continue;
+
+    console.log(`▶ TTS [${i + 1}]: "${text.slice(0, 60)}${text.length > 60 ? "…" : ""}"`);
+    const audioPath = await synthesizeText(text, cfg.narration, cacheDir);
+    const durationMs = getAudioDurationMs(audioPath);
+
+    // Audio gana: extender el duration del caption para que dure al menos lo
+    // que dura la voz, con 400ms de cola antes del fade-out.
+    const originalDuration = step.duration ?? 2800;
+    step.duration = Math.max(originalDuration, durationMs + 400);
+
+    clips.push({ stepIndex: i, audioPath, durationMs });
+  }
+  return clips;
+}
+
+/**
+ * Mezcla los clips de audio sobre el MP4 final usando ffmpeg adelay + amix.
+ * Reemplaza el MP4 in-place.
+ */
+function muxNarration(
+  mp4Path: string,
+  clips: Array<{ audioPath: string; offsetMs: number }>,
+): void {
+  if (clips.length === 0) return;
+
+  const tmpOut = mp4Path + ".tmp.mp4";
+  const inputs = clips.map((c) => `-i "${c.audioPath}"`).join(" ");
+  const delayParts = clips
+    .map((c, idx) => `[${idx + 1}:a]adelay=${c.offsetMs}|${c.offsetMs}[a${idx}]`)
+    .join("; ");
+  const aLabels = clips.map((_, idx) => `[a${idx}]`).join("");
+  // normalize=0 mantiene volumen — sin esto, amix divide por N inputs y queda muy bajo.
+  const filter = `${delayParts}; ${aLabels}amix=inputs=${clips.length}:duration=longest:normalize=0[aout]`;
+
+  console.log(`▶ Mux ${clips.length} narration clip(s) into MP4…`);
+  execSync(
+    `ffmpeg -y -i "${mp4Path}" ${inputs} -filter_complex "${filter}" ` +
+      `-map 0:v -map "[aout]" -c:v copy -c:a aac -b:a 192k "${tmpOut}"`,
+    { stdio: ["ignore", "ignore", "inherit"] },
+  );
+  renameSync(tmpOut, mp4Path);
+}
+
 // ── Step executor ──────────────────────────────────────────────────────────
 
 async function executeStep(
@@ -262,6 +437,16 @@ export async function recordDemo(cfg: DemoConfig): Promise<{ mp4: string; webm: 
   const videoDir = join(outDir, ".demo-videos");
   if (!existsSync(videoDir)) mkdirSync(videoDir, { recursive: true });
 
+  // Phase 1 — pre-síntesis de narraciones (si están configuradas).
+  // Esto muta `step.duration` para captions narrados, así la grabación
+  // ya queda con el timing correcto.
+  const narrationCacheDir = join(outDir, ".demo-audio-cache");
+  const narrationClips = await preSynthesizeNarrations(cfg, narrationCacheDir);
+  // Map de stepIndex → clip, para resolver offsets durante el recording.
+  const clipByStep = new Map(narrationClips.map((c) => [c.stepIndex, c]));
+  /** Offsets relativos al inicio de la grabación, en ms. */
+  const muxClips: Array<{ audioPath: string; offsetMs: number }> = [];
+
   console.log(`▶ Launching Chromium (viewport ${viewport.width}x${viewport.height})…`);
   let browser: Browser | undefined;
   let context: BrowserContext | undefined;
@@ -274,6 +459,9 @@ export async function recordDemo(cfg: DemoConfig): Promise<{ mp4: string; webm: 
     });
     const page = await context.newPage();
 
+    // t=0 del audio mux. Aproximación de cuándo Playwright empezó a grabar.
+    const recordingStartMs = Date.now();
+
     console.log(`▶ Running ${cfg.steps.length} steps…`);
     for (let i = 0; i < cfg.steps.length; i++) {
       const step = cfg.steps[i];
@@ -282,6 +470,15 @@ export async function recordDemo(cfg: DemoConfig): Promise<{ mp4: string; webm: 
           ? `caption: "${step.text.slice(0, 60)}"`
           : step.type;
       console.log(`  [${i + 1}/${cfg.steps.length}] ${label}`);
+      // Si este caption tiene narración pre-sintetizada, marca su offset
+      // justo antes de mostrar el subtítulo (el audio arranca con el fade-in).
+      const clip = clipByStep.get(i);
+      if (clip) {
+        muxClips.push({
+          audioPath: clip.audioPath,
+          offsetMs: Date.now() - recordingStartMs,
+        });
+      }
       await executeStep(page, step, { baseUrl: cfg.baseUrl, accentColor });
     }
 
@@ -310,6 +507,9 @@ export async function recordDemo(cfg: DemoConfig): Promise<{ mp4: string; webm: 
     `ffmpeg -y -i "${rawWebm}" -c:v libx264 -preset slow -crf ${crf} -pix_fmt yuv420p -movflags +faststart "${cfg.output}"`,
     { stdio: ["ignore", "ignore", "inherit"] },
   );
+
+  // Phase 3 — mezcla narración (si hay).
+  muxNarration(cfg.output, muxClips);
 
   console.log(`✓ MP4: ${cfg.output}`);
   return { mp4: cfg.output, webm: rawWebm };

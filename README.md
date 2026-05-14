@@ -16,6 +16,7 @@ A diferencia de grabar la pantalla con QuickTime, esto:
 - ✅ **Reproducible** — corre 10 veces y sale igual
 - ✅ Resolución exacta del viewport, no del display
 - ✅ Captions y highlights inyectados al DOM (no son edición post-hoc)
+- ✅ **Voz opcional** vía ElevenLabs — narración sincronizada con cada caption
 
 ## Quick start
 
@@ -104,9 +105,61 @@ Después de correr:
 
 Tamaño típico: ~4-8 MB para 2-3 min en 1280×800.
 
+## Narración con voz (ElevenLabs)
+
+Opcional. Si pasas un bloque `narration`, cada `caption` se sintetiza con
+ElevenLabs y se mezcla al MP4 final. La duración del caption en pantalla se
+ajusta automáticamente al largo del audio (audio gana — nunca se corta voz).
+
+```ts
+import { recordDemo } from "../scripts/engine";
+
+await recordDemo({
+  baseUrl: "http://localhost:3000",
+  output: "/tmp/demo.mp4",
+  narration: {
+    // apiKey: lee process.env.ELEVENLABS_API_KEY por default
+    voiceId: "EXAVITQu4vr4xnSDxMaL",        // Sarah — narradora natural
+    modelId: "eleven_multilingual_v2",       // soporta español
+    stability: 0.5,
+    similarityBoost: 0.75,
+  },
+  steps: [
+    { type: "navigate", url: "/" },
+    // Texto corto en pantalla, narración expandida:
+    {
+      type: "caption",
+      text: "Login",
+      narrationText: "Primero ingresamos con la cuenta de admin.",
+    },
+    { type: "fill", selector: 'input[type="email"]', value: "admin@x.com" },
+    // ...
+    // Caption sin voz:
+    { type: "caption", text: "Fin", mute: true, duration: 1500 },
+  ],
+});
+```
+
+**Setup:**
+```bash
+export ELEVENLABS_API_KEY=tu_api_key
+```
+
+**Costo:** `eleven_multilingual_v2` cuesta ~$0.30/1k chars. Un demo típico
+(500-1500 chars de captions) sale ~$0.15-0.45. Re-runs son **gratis**: hay
+cache SHA1 en `<outDir>/.demo-audio-cache/`. Para invalidar, borra ese
+directorio.
+
+**Voice IDs útiles** (públicos de ElevenLabs):
+- `21m00Tcm4TlvDq8ikWAM` — Rachel (inglés, calma)
+- `EXAVITQu4vr4xnSDxMaL` — Sarah (multilingüe, natural)
+- `pNInz6obpgDQGcFmaJgB` — Adam (inglés, profesional)
+- Custom: clónate tu propia voz en app.elevenlabs.io y usa su ID
+
 ## Examples
 
 - [`examples/basic-login-demo.ts`](./examples/basic-login-demo.ts) — hello world, login + 1 query.
+- [`examples/narrated-demo.ts`](./examples/narrated-demo.ts) — el mismo flow con voz de ElevenLabs.
 - [`examples/javer-multi-profile.ts`](./examples/javer-multi-profile.ts) — caso real: 3 perfiles + envío de email + preview HTML. Buena referencia de complejidad real.
 
 ## Requisitos
