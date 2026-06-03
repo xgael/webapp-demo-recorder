@@ -77,6 +77,39 @@ await recordDemo(config);
 | { type: "highlight"; selector: string; duration?: number; color?: string }  // box-shadow rojo
 | { type: "scrollToBottom"; speedPxPerFrame?: number }                    // scroll suave hasta el fin
 | { type: "clickLink"; selector: string }                                 // click → navigate al href
+| { type: "evaluate"; code: string }                                      // ejecuta JS arbitrario en la página
+| { type: "narrate"; audio: string; padMs?: number }                      // voiceover: registra cue + mantiene pantalla mientras dura el audio
+| { type: "zoom"; selector: string; scale?: number; duration?: number; hold?: number; reset?: boolean; clamp?: boolean }  // Ken Burns: acerca a un elemento (centrado preciso), mantiene, y vuelve
+| { type: "resetZoom"; duration?: number }                                // aleja al estado normal (para zoom con reset:false)
+| { type: "titleCard"; title: string; subtitle?: string; duration?: number; logo?: string; bg?: string; accent?: string }  // placa de branding (intro/outro)
+```
+
+### Zoom / Ken Burns + intro/outro (title cards)
+
+**`zoom`** acerca la "cámara" a un elemento para resaltar un dato/campo (clave en
+pantallas chicas/celular). Se implementa con un `transform: translate()+scale()`
+CSS sobre `<html>` (Playwright lo graba porque todo se renderiza en el browser).
+Por default hace zoom-in → `hold` → zoom-out en un solo step:
+```ts
+{ type: "zoom", selector: "#kpi-ingresos", scale: 2.0, hold: 1800 }   // entra, mantiene 1.8s, sale
+{ type: "zoom", selector: "#form", scale: 1.7, reset: false }          // se queda acercado…
+{ type: "type", selector: "#campo", value: "..." }                     // …mientras interactúas
+{ type: "resetZoom" }                                                  // …y luego alejas
+```
+- `scale` default 1.6, `duration` (animación in/out) default 900ms, `hold` default 1600ms.
+- `reset:false` deja la cámara acercada hasta un `resetZoom` posterior — útil para teclear/clicar acercado.
+- **Centrado preciso:** internamente resetea scroll a 0 (coords de documento deterministas), mide el centro del elemento y aplica `translate + scale` para llevarlo al **centro exacto del viewport** (no es solo `transform-origin`, que dejaría el elemento pegado a su esquina). Pinta el fondo de `<html>` igual al del `<body>` para que el margen revelado al centrar un elemento de orilla se mezcle.
+- `clamp: true` (default false) evita revelar margen fuera del documento, a costa de NO centrar elementos pegados a una orilla.
+- **Gotcha:** durante un zoom activo, los `caption`/`titleCard` (position:fixed) quedan relativos al `<html>` transformado → se desplazan. No los mezcles con un zoom abierto; resetea antes. Y como resetea scroll a 0 al iniciar, haz el zoom poco después de un `navigate` (si la página venía muy scrolleada habría un salto).
+
+**`titleCard`** = placa full-screen con fade in/out, para intro (logo + nombre del
+proyecto) y outro (CTA/contacto). El `logo` puede ser ruta de archivo local (se
+incrusta como data-uri base64) o URL/data-uri. `bg` acepta color o gradiente CSS:
+```ts
+{ type: "titleCard", title: "Mi App", subtitle: "Demo de funcionalidades",
+  logo: "./assets/logo.png", duration: 3000 }
+{ type: "titleCard", title: "¿Listo para empezar?", subtitle: "ventas@miapp.com",
+  bg: "radial-gradient(circle at 70% 30%, #2a1d4d 0%, #0c0e16 70%)" }
 ```
 
 ## Workflow típico (cómo lo invocas como Claude)

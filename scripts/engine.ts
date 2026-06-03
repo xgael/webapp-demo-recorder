@@ -10,7 +10,7 @@
  * email, navegadores, todo).
  */
 import { chromium, type Browser, type BrowserContext, type Page } from "playwright";
-import { renameSync, readdirSync, mkdirSync, existsSync, writeFileSync } from "fs";
+import { renameSync, readdirSync, mkdirSync, existsSync, writeFileSync, readFileSync } from "fs";
 import { join, dirname, basename } from "path";
 import { execSync } from "child_process";
 
@@ -48,7 +48,32 @@ export type DemoStep =
   | { type: "evaluate"; code: string }
   /** Punto de narración: registra el offset real en el video y mantiene la pantalla
    *  visible mientras dura el audio (+ padMs, default 700). El audio se mezcla en post. */
-  | { type: "narrate"; audio: string; padMs?: number };
+  | { type: "narrate"; audio: string; padMs?: number }
+  /** Efecto Ken Burns: acerca la "cámara" a un elemento (scale), mantiene `hold` ms,
+   *  y por default vuelve a alejarse (reset). Útil para resaltar un campo/dato sin
+   *  perderlo en pantallas chicas. */
+  | {
+      type: "zoom";
+      selector: string;
+      scale?: number;       // factor de acercamiento (default 1.6)
+      duration?: number;    // ms de la animación de entrada/salida (default 900)
+      hold?: number;        // ms que se mantiene acercado (default 1600)
+      reset?: boolean;      // si false, se queda acercado (usa resetZoom luego). Default true
+      clamp?: boolean;      // si true, no revela margen fuera del documento (no centra orillas). Default false → centrado exacto
+    }
+  /** Aleja la cámara al estado normal (para zooms con reset:false). */
+  | { type: "resetZoom"; duration?: number }
+  /** Placa de título/branding a pantalla completa (intro u outro). Hace fade-in,
+   *  mantiene `duration` ms y fade-out. */
+  | {
+      type: "titleCard";
+      title: string;
+      subtitle?: string;
+      duration?: number;    // ms visible (default 3000)
+      logo?: string;        // ruta a archivo local (se incrusta base64) o URL/data-uri
+      bg?: string;          // fondo (color o gradiente CSS). Default gradiente oscuro
+      accent?: string;      // color de acento. Default accentColor del config
+    };
 
 export interface DemoConfig {
   /** URL base del app a grabar. */
@@ -188,6 +213,184 @@ async function scrollToBottom(page: Page, speed: number) {
   await page.waitForTimeout(500);
 }
 
+// ── Ken Burns (zoom/pan) ─────────────────────────────────────────────────────
+// El zoom se logra con un transform CSS sobre <html>, que Playwright SÍ graba
+// (todo se renderiza dentro del browser). Se acerca alrededor del centro del
+// elemento objetivo, manteniéndolo visualmente fijo mientras se magnifica.
+
+async function zoomToRegion(
+  page: Page,
+  selector: string,
+  scale: number,
+  durationMs: number,
+  clamp: boolean,
+) {
+  await page.evaluate(
+    ({ selector, scale, durationMs, clamp }) => {
+      const el = document.querySelector(selector) as HTMLElement | null;
+      if (!el) throw new Error(`zoom: no encontré ${selector}`);
+      const root = document.documentElement;
+      // Normaliza: quita cualquier transform previo y resetea scroll a 0 para
+      // trabajar en coordenadas de documento deterministas (sin ambigüedad de
+      // scroll cuando <html> está transformado).
+      root.style.transition = "none";
+      root.style.transform = "";
+      root.style.transformOrigin = "0 0";
+      // Pinta el fondo de <html> igual al del <body>, para que el margen que se
+      // revela al centrar un elemento de orilla se mezcle (no se vea "vacío").
+      if (!(root as HTMLElement).dataset.zoomBg) {
+        (root as HTMLElement).dataset.zoomBg = root.style.background || "__none__";
+        const bodyBg = getComputedStyle(document.body).backgroundColor;
+        if (bodyBg && bodyBg !== "rgba(0, 0, 0, 0)" && bodyBg !== "transparent") {
+          root.style.background = bodyBg;
+        }
+      }
+      window.scrollTo(0, 0);
+
+      return new Promise<void>((resolve) => {
+        // Doble rAF: deja que el layout se asiente tras resetear transform/scroll.
+        requestAnimationFrame(() =>
+          requestAnimationFrame(() => {
+            const vw = window.innerWidth;
+            const vh = window.innerHeight;
+            const r = el.getBoundingClientRect(); // con scroll=0 → coords de documento
+            const ecx = r.left + r.width / 2;
+            const ecy = r.top + r.height / 2;
+
+            // Cámara: lleva el centro del elemento al centro del viewport y escala.
+            // P' = translate(t) + scale(S)·P  (transform-origin 0 0). Esto CENTRA
+            // el elemento con precisión (el centrado es la prioridad).
+            let tx = vw / 2 - scale * ecx;
+            let ty = vh / 2 - scale * ecy;
+
+            // Clamp OPCIONAL: si se pide, mantiene el documento escalado cubriendo
+            // el viewport (no revela margen) a costa de no centrar elementos de
+            // orilla. Por default NO se clampa → centrado exacto.
+            if (clamp) {
+              const docW = root.scrollWidth;
+              const docH = root.scrollHeight;
+              const minTx = vw - scale * docW;
+              const minTy = vh - scale * docH;
+              if (minTx <= 0) tx = Math.min(0, Math.max(minTx, tx));
+              if (minTy <= 0) ty = Math.min(0, Math.max(minTy, ty));
+            }
+
+            root.style.transition = `transform ${durationMs}ms cubic-bezier(0.4,0,0.2,1)`;
+            root.style.transform = `translate(${tx}px, ${ty}px) scale(${scale})`;
+            resolve();
+          }),
+        );
+      });
+    },
+    { selector, scale, durationMs, clamp },
+  );
+  await page.waitForTimeout(durationMs + 500);
+}
+
+async function resetZoom(page: Page, durationMs: number) {
+  await page.evaluate((durationMs) => {
+    const root = document.documentElement as HTMLElement;
+    root.style.transition = `transform ${durationMs}ms cubic-bezier(0.4,0,0.2,1)`;
+    root.style.transform = "translate(0px, 0px) scale(1)";
+    setTimeout(() => {
+      root.style.transition = "";
+      root.style.transform = "";
+      root.style.transformOrigin = "";
+      // Restaura el fondo original de <html>.
+      const saved = root.dataset.zoomBg;
+      if (saved !== undefined) {
+        root.style.background = saved === "__none__" ? "" : saved;
+        delete root.dataset.zoomBg;
+      }
+    }, durationMs + 50);
+  }, durationMs);
+  await page.waitForTimeout(durationMs + 150);
+}
+
+// ── Title card (intro/outro branding) ────────────────────────────────────────
+
+/** Resuelve un logo a algo usable en <img src>: si es archivo local, lo incrusta
+ *  como data-uri base64; si ya es URL o data-uri, lo deja igual. */
+function resolveLogoSrc(logo?: string): string | null {
+  if (!logo) return null;
+  if (logo.startsWith("http") || logo.startsWith("data:")) return logo;
+  if (!existsSync(logo)) return null;
+  const ext = logo.split(".").pop()?.toLowerCase() ?? "";
+  const mime =
+    ext === "svg" ? "image/svg+xml" :
+    ext === "png" ? "image/png" :
+    ext === "jpg" || ext === "jpeg" ? "image/jpeg" :
+    ext === "webp" ? "image/webp" :
+    ext === "gif" ? "image/gif" : "application/octet-stream";
+  const b64 = readFileSync(logo).toString("base64");
+  return `data:${mime};base64,${b64}`;
+}
+
+async function showTitleCard(
+  page: Page,
+  opts: {
+    title: string;
+    subtitle?: string;
+    durationMs: number;
+    logoSrc: string | null;
+    bg: string;
+    accent: string;
+  },
+) {
+  await page.evaluate((o) => {
+    const old = document.getElementById("__demo_titlecard__");
+    if (old) old.remove();
+    const card = document.createElement("div");
+    card.id = "__demo_titlecard__";
+    card.style.cssText = `
+      position:fixed; inset:0; z-index:2147483647;
+      display:flex; flex-direction:column; align-items:center; justify-content:center;
+      gap:22px; text-align:center;
+      background:${o.bg};
+      font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+      opacity:0; transition:opacity 0.5s ease;
+    `;
+    const inner = document.createElement("div");
+    inner.style.cssText = `
+      display:flex; flex-direction:column; align-items:center; gap:18px;
+      transform:translateY(14px); transition:transform 0.6s cubic-bezier(0.2,0.7,0.2,1);
+    `;
+    if (o.logoSrc) {
+      const img = document.createElement("img");
+      img.src = o.logoSrc;
+      img.style.cssText = "max-width:140px; max-height:140px; object-fit:contain;";
+      inner.appendChild(img);
+    }
+    const h = document.createElement("div");
+    h.textContent = o.title;
+    h.style.cssText = `
+      color:#fff; font-size:52px; font-weight:800; letter-spacing:-0.02em;
+      line-height:1.1; max-width:90vw;
+    `;
+    inner.appendChild(h);
+    const bar = document.createElement("div");
+    bar.style.cssText = `width:64px; height:4px; border-radius:2px; background:${o.accent};`;
+    inner.appendChild(bar);
+    if (o.subtitle) {
+      const s = document.createElement("div");
+      s.textContent = o.subtitle;
+      s.style.cssText = `color:rgba(255,255,255,0.78); font-size:22px; font-weight:500; max-width:80vw;`;
+      inner.appendChild(s);
+    }
+    card.appendChild(inner);
+    document.body.appendChild(card);
+    requestAnimationFrame(() => {
+      card.style.opacity = "1";
+      (inner as HTMLElement).style.transform = "translateY(0)";
+    });
+    setTimeout(() => {
+      card.style.opacity = "0";
+      setTimeout(() => card.remove(), 550);
+    }, o.durationMs);
+  }, opts);
+  await page.waitForTimeout(opts.durationMs + 600 + 300); // fade-in + hold + fade-out
+}
+
 // ── Step executor ──────────────────────────────────────────────────────────
 
 /** Duración de un archivo de audio en ms, vía ffprobe. Fallback 3000ms. */
@@ -276,6 +479,28 @@ async function executeStep(
       if (rec) rec.cues.push({ audio: step.audio, atMs: Date.now() - rec.t0, durMs });
       await page.waitForTimeout(durMs + (step.padMs ?? 700));
       return;
+    }
+    case "zoom": {
+      const dur = step.duration ?? 900;
+      await zoomToRegion(page, step.selector, step.scale ?? 1.6, dur, step.clamp ?? false);
+      await page.waitForTimeout(step.hold ?? 1600);
+      if (step.reset !== false) await resetZoom(page, dur);
+      return;
+    }
+    case "resetZoom":
+      return resetZoom(page, step.duration ?? 900);
+    case "titleCard": {
+      const bg =
+        step.bg ??
+        "radial-gradient(circle at 30% 20%, #1f2433 0%, #0c0e16 70%)";
+      return showTitleCard(page, {
+        title: step.title,
+        subtitle: step.subtitle,
+        durationMs: step.duration ?? 3000,
+        logoSrc: resolveLogoSrc(step.logo),
+        bg,
+        accent: step.accent ?? cfg.accentColor,
+      });
     }
     default: {
       const _exhaustive: never = step;
