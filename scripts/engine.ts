@@ -10,7 +10,7 @@
  * email, navegadores, todo).
  */
 import { chromium, type Browser, type BrowserContext, type Page } from "playwright";
-import { renameSync, readdirSync, mkdirSync, existsSync } from "fs";
+import { renameSync, readdirSync, mkdirSync, existsSync, writeFileSync } from "fs";
 import { join, dirname, basename } from "path";
 import { execSync } from "child_process";
 
@@ -43,7 +43,12 @@ export type DemoStep =
   /** Scroll suave hasta el bottom (útil para mostrar un mail/página largo). */
   | { type: "scrollToBottom"; speedPxPerFrame?: number }
   /** Click sobre un link y navega a su href (resuelto contra baseUrl si relativo). */
-  | { type: "clickLink"; selector: string };
+  | { type: "clickLink"; selector: string }
+  /** Ejecuta JS arbitrario en el contexto de la página (window/document). */
+  | { type: "evaluate"; code: string }
+  /** Punto de narración: registra el offset real en el video y mantiene la pantalla
+   *  visible mientras dura el audio (+ padMs, default 700). El audio se mezcla en post. */
+  | { type: "narrate"; audio: string; padMs?: number };
 
 export interface DemoConfig {
   /** URL base del app a grabar. */
@@ -60,6 +65,8 @@ export interface DemoConfig {
   accentColor?: string;
   /** CRF de ffmpeg (calidad). 18 = casi lossless, 22 = bueno, 28 = aceptable. Default: 22. */
   crf?: number;
+  /** JS inyectado en cada documento antes de cargar (page.addInitScript). Útil para ocultar elementos del UI durante toda la navegación. */
+  initScript?: string;
 }
 
 // ── Helpers que viven dentro del browser ────────────────────────────────────
@@ -183,10 +190,28 @@ async function scrollToBottom(page: Page, speed: number) {
 
 // ── Step executor ──────────────────────────────────────────────────────────
 
+/** Duración de un archivo de audio en ms, vía ffprobe. Fallback 3000ms. */
+function audioDurationMs(file: string): number {
+  try {
+    const out = execSync(
+      `ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "${file}"`,
+    )
+      .toString()
+      .trim();
+    const s = parseFloat(out);
+    return Number.isFinite(s) ? Math.round(s * 1000) : 3000;
+  } catch {
+    return 3000;
+  }
+}
+
+type RecCtx = { t0: number; cues: { audio: string; atMs: number; durMs: number }[] };
+
 async function executeStep(
   page: Page,
   step: DemoStep,
   cfg: Required<Pick<DemoConfig, "baseUrl" | "accentColor">>,
+  rec?: RecCtx,
 ) {
   switch (step.type) {
     case "caption":
@@ -241,6 +266,17 @@ async function executeStep(
       await page.waitForTimeout(500);
       return;
     }
+    case "evaluate":
+      await page.evaluate(step.code);
+      return page.waitForTimeout(150);
+    case "narrate": {
+      // Registra el offset real (wall-clock = tiempo de video) y mantiene la
+      // pantalla visible mientras "suena" la voz. El audio se mezcla en post.
+      const durMs = audioDurationMs(step.audio);
+      if (rec) rec.cues.push({ audio: step.audio, atMs: Date.now() - rec.t0, durMs });
+      await page.waitForTimeout(durMs + (step.padMs ?? 700));
+      return;
+    }
     default: {
       const _exhaustive: never = step;
       void _exhaustive;
@@ -265,6 +301,7 @@ export async function recordDemo(cfg: DemoConfig): Promise<{ mp4: string; webm: 
   console.log(`▶ Launching Chromium (viewport ${viewport.width}x${viewport.height})…`);
   let browser: Browser | undefined;
   let context: BrowserContext | undefined;
+  const rec: RecCtx = { t0: 0, cues: [] };
   try {
     browser = await chromium.launch({ headless: true });
     context = await browser.newContext({
@@ -273,6 +310,8 @@ export async function recordDemo(cfg: DemoConfig): Promise<{ mp4: string; webm: 
       recordVideo: { dir: videoDir, size: viewport },
     });
     const page = await context.newPage();
+    if (cfg.initScript) await page.addInitScript(cfg.initScript);
+    rec.t0 = Date.now(); // inicio efectivo de grabación → base de offsets de narración
 
     console.log(`▶ Running ${cfg.steps.length} steps…`);
     for (let i = 0; i < cfg.steps.length; i++) {
@@ -282,7 +321,7 @@ export async function recordDemo(cfg: DemoConfig): Promise<{ mp4: string; webm: 
           ? `caption: "${step.text.slice(0, 60)}"`
           : step.type;
       console.log(`  [${i + 1}/${cfg.steps.length}] ${label}`);
-      await executeStep(page, step, { baseUrl: cfg.baseUrl, accentColor });
+      await executeStep(page, step, { baseUrl: cfg.baseUrl, accentColor }, rec);
     }
 
     // Close context FIRST — Playwright finishes the webm only on context close.
@@ -312,6 +351,12 @@ export async function recordDemo(cfg: DemoConfig): Promise<{ mp4: string; webm: 
   );
 
   console.log(`✓ MP4: ${cfg.output}`);
+
+  if (rec.cues.length > 0) {
+    const cuesPath = join(outDir, basename(cfg.output, ".mp4") + ".cues.json");
+    writeFileSync(cuesPath, JSON.stringify(rec.cues, null, 2));
+    console.log(`✓ Narration cues (${rec.cues.length}): ${cuesPath}`);
+  }
   return { mp4: cfg.output, webm: rawWebm };
 }
 

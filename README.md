@@ -95,6 +95,7 @@ await recordDemo({
 | `highlight` | Box-shadow temporal sobre un selector. |
 | `scrollToBottom` | Scroll suave hasta el final. |
 | `clickLink` | Click sobre un `<a>` y navega a su `href`. |
+| `narrate` | Marca un punto de narración: registra el offset real en el video (→ `<output>.cues.json`) y mantiene la pantalla mientras dura el audio. El audio se mezcla en post. |
 
 ## Output
 
@@ -103,6 +104,51 @@ Después de correr:
 - `<output>.webm` — raw de Playwright (puedes borrarlo)
 
 Tamaño típico: ~4-8 MB para 2-3 min en 1280×800.
+
+## Voiceover, música y ocultar UI
+
+### Narración sincronizada (`narrate` + `cues.json`)
+
+El step `narrate` registra el offset **real** de cada línea en el video grabado y lo emite en `<output>.cues.json` (`[{ audio, atMs, durMs }]`). Como la grabación es en tiempo real (wall-clock = tiempo de video), puedes mezclar la voz en post **sin drift**: coloca cada clip en su `atMs` con `adelay` + `amix`.
+
+```ts
+{ type: "navigate", url: "/dashboard" },
+{ type: "narrate", audio: "audio/01.mp3" },   // pantalla visible mientras dura el audio
+```
+
+Tip: para mantener el total bajo un límite **sin acelerar la voz**, comprime en post SOLO los tramos sin voz (navegación, esperas) dejando los `narrate` a 1×.
+
+### Música de fondo (ElevenLabs Music)
+
+`scripts/music.ts` genera una pista con el modelo de música de ElevenLabs y la mezcla **por debajo** del audio del video (la voz queda encima):
+
+```ts
+import { generateBackgroundMusic, mixMusicUnder } from "./scripts/music";
+
+await generateBackgroundMusic({
+  prompt: "Sleek minimal corporate-tech score, soft synth pads, gentle pulse, instrumental, leaves room for a voiceover",
+  lengthMs: 60000,
+  output: "/tmp/bg.mp3",
+});                                  // requiere ELEVENLABS_API_KEY en el entorno
+
+mixMusicUnder({
+  video: "demo.mp4",
+  music: "/tmp/bg.mp3",
+  output: "demo-music.mp4",
+  volume: 0.22,                      // 0–1; fondo sutil bajo la narración
+});
+```
+
+### Ocultar elementos del UI (`initScript`)
+
+`DemoConfig.initScript` inyecta JS en cada documento **antes** de cargar (vía `page.addInitScript`), útil para esconder elementos del menú en TODA la navegación:
+
+```ts
+recordDemo({
+  // ...
+  initScript: `(()=>{var s=document.createElement('style');s.textContent='a[href$="/titulos"]{display:none!important}';(document.head||document.documentElement).appendChild(s);})()`,
+});
+```
 
 ## Examples
 
